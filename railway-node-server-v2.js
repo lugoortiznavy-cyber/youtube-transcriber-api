@@ -1,294 +1,199 @@
-import express from 'express';
-import cors from 'cors';
-import { execSync, exec } from 'child_process';
-import OpenAI from 'openai';
-import fs from 'fs';
-import path from 'path';
-import os from 'os';
-import { promisify } from 'util';
+import express from "express";
+import cors from "cors";
+import multer from "multer";
+import fs from "fs/promises";
+import { createReadStream } from "fs";
+import path from "path";
+import os from "os";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import OpenAI from "openai";
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 const app = express();
-const port = process.env.PORT || 3000;
-const openai = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY,
-  });
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 50 * 1024 * 1024,
+  },
+});
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "2mb" }));
 
-// Health check endpoint
-app.get('/health', (req, res) => {
-    res.json({ ok: true });
+const openai = process.env.OPENAI_API_KEY
+  ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+  : null;
+
+function extractVideoId(url) {
+  try {
+    const u = new URL(url);
+    if (u.hostname === "youtu.be") return u.pathname.slice(1) || null;
+    if (u.hostname.includes("youtube.com") || u.hostname.includes("m.youtube.com")) {
+      if (u.pathname === "/watch") return u.searchParams.get("v");
+      if (u.pathname.startsWith("/shorts/")) return u.pathname.split("/")[2] || null;
+      if (u.pathname.startsWith("/embed/")) return u.pathname.split("/")[2] || null;
+    }
+    return null;
+  } catch { return null; }
+}
+
+function formatSrtTime(seconds) {
+  const ms = Math.max(0, Math.round(seconds * 1000));
+  const hours = Math.floor(ms / 3600000);
+  const minutes = Math.floor((ms % 3600000) / 60000);
+  const secs = Math.floor((ms % 60000) / 1000);
+  const millis = ms % 1000;
+  return String(hours).padStart(2,"0")+":"+String(minutes).padStart(2,"0")+":"+String(secs).padStart(2,"0")+","+String(millis).padStart(3,"0");
+}
+
+function segmentsToSrt(segments) {
+  return segments.map((seg, i) => {
+    const start = formatSrtTime(seg.start);
+    const end = formatSrtTime(seg.start + seg.duration);
+    return (i+1)+"\n"+start+" --> "+end+"\n"+seg.text+"\n";
+  }).join("\n");
+}
+
+function wordCount(text) { return text.trim() ? text.trim().split(/\s+/).length : 0; }
+
+function normalizeText(text) {
+  return text.replace(/\s+/g," ").replace(/\s([,.!?;:])/g,"$1").trim();
+}
+
+function parseJson3CaptionTrack(json3) {
+  const events = Array.isArray(json3?.events) ? json3.events : [];
+  const segments = [];
+  for (const event of events) {
+    const startMs = typeof event.tStartMs === "number" ? event.tStartMs : null;
+    const durMs = typeof event.dDurationMs === "number" ? event.dDurationMs : null;
+    const segs = Array.isArray(event.segs) ? event.segs : null;
+    if (startMs === null || !segs?.length) continue;
+    const text = segs.map((s) => (typeof s.utf8 === "string" ? s.utf8 : "")).join("").replace(/\n/g," ").trim();
+    if (!text) continue;
+    segments.push({ text: normalizeText(text), start: startMs/1000, duration: durMs ? durMs/1000 : 2 });
+  }
+  const transcript = normalizeText(segments.map((s) => s.text).join(" "));
+  return { transcript, segments };
+}
+
+async function runYtDlpJson(url) {
+  const { stdout } = await execFileAsync("yt-dlp", ["--dump-single-json","--skip-download","--no-warnings","--no-playlist",url], { maxBuffer: 20*1024*1024 });
+  return JSON.parse(stdout);
+}
+
+function pickSubtitleUrl(info) {
+  for (const group of [info?.subtitles||{}, info?.automatic_captions||{}]) {
+    for (const lang of Object.keys(group)) {
+      const tracks = group[lang];
+      if (!Array.isArray(tracks)) continue;
+      const json3 = tracks.find((t) => t.ext==="json3" && t.url) || tracks.find((t) => t.url);
+      if (json3?.url) return { url: json3.url, language: lang };
+    }
+  }
+  return null;
+}
+
+async function fetchJson(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error("Subtitle fetch failed: "+res.status);
+  return await res.json();
+}
+
+async function cleanTranscriptWithOpenAI(transcript) {
+  if (!openai || !transcript) return transcript;
+  const response = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      { role: "system", content: "Limpia este transcript sin cambiar el significado. Corrige puntuación, separa en párrafos legibles y elimina repeticiones o muletillas obvias. Devuelve solo el texto final." },
+      { role: "user", content: transcript },
+    ],
+    temperature: 0.2,
   });
+  return response.choices?.[0]?.message?.content?.trim() || transcript;
+}
 
-// Helper function to validate YouTube URL
-function isValidYoutubeUrl(url) {
-    const regex = /(?:youtube\.com\/.*v=|youtu\.be\/|shorts\/)([^&\n?#]+)/;
-                                                                  return regex.test(url);
-                                                                }
+async function transcribeAudioWithOpenAI(filePath) {
+  if (!openai) throw new Error("OPENAI_API_KEY no configurada para fallback");
+  const transcription = await openai.audio.transcriptions.create({
+    file: createReadStream(filePath),
+    model: "whisper-1",
+    response_format: "verbose_json",
+  });
+  const segments = Array.isArray(transcription.segments)
+    ? transcription.segments.map((s) => ({ text: normalizeText(s.text||""), start: Number(s.start||0), duration: Math.max(0.1, Number(s.end||0)-Number(s.start||0)) }))
+    : [];
+  return { transcript: normalizeText(transcription.text||""), segments, language: transcription.language||null, duration: typeof transcription.duration==="number" ? transcription.duration : null };
+}
 
-                                                                // Helper function to extract video ID
-                                                                function getVideoId(url) {
-                                                                    const regex = /(?:youtube\.com\/.*v=|youtu\.be\/|shorts\/)([^&\n?#]+)/;
-                                                                                                                                  const match = url.match(regex);
-                                                                                                                                  return match ? match[1] : null;
-                                                                                                                                }
-                                                                                                                                
-                                                                                                                                // Helper function to parse JSON3 format (YouTube captions format)
-                                                                                                                                function parseJson3Captions(json3Text) {
-                                                                                                                                    try {
-                                                                                                                                          const json3 = JSON.parse(json3Text);
-                                                                                                                                          if (!json3.events) return null;
-                                                                                                                                          
-                                                                                                                                          const segments = [];
-                                                                                                                                          for (const event of json3.events) {
-                                                                                                                                                  if (event.segs) {
-                                                                                                                                                            let text = '';
-                                                                                                                                                            for (const seg of event.segs) {
-                                                                                                                                                                        text += seg.utf8 || '';
-                                                                                                                                                                      }
-                                                                                                                                                            if (text.trim()) {
-                                                                                                                                                                        segments.push({
-                                                                                                                                                                                      text: text.trim(),
-                                                                                                                                                                                      start: (event.tStartMs || 0) / 1000,
-                                                                                                                                                                                      duration: (event.dDurationMs || 0) / 1000
-                                                                                                                                                                                    });
-                                                                                                                                                                      }
-                                                                                                                                                          }
-                                                                                                                                                }
-                                                                                                                                          return segments.length > 0 ? segments : null;
-                                                                                                                                        } catch (e) {
-                                                                                                                                          return null;
-                                                                                                                                        }
-                                                                                                                                  }
-                                                                                                                                
-                                                                                                                                // Helper function to generate SRT from segments
-                                                                                                                                function generateSRT(segments) {
-                                                                                                                                    if (!segments || segments.length === 0) return '';
-                                                                                                                                    
-                                                                                                                                    return segments.map((seg, idx) => {
-                                                                                                                                          const start = seg.start;
-                                                                                                                                          const end = seg.start + seg.duration;
-                                                                                                                                          
-                                                                                                                                          const formatTime = (seconds) => {
-                                                                                                                                                  const hours = Math.floor(seconds / 3600);
-                                                                                                                                                  const minutes = Math.floor((seconds % 3600) / 60);
-                                                                                                                                                  const secs = Math.floor(seconds % 60);
-                                                                                                                                                  const ms = Math.floor((seconds % 1) * 1000);
-                                                                                                                                                  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')},${String(ms).padStart(3, '0')}`;
-                                                                                                                                                };
-                                                                                                                                          
-                                                                                                                                          return `${idx + 1}\n${formatTime(start)} --> ${formatTime(end)}\n${seg.text}\n`;
-                                                                                                                                        }).join('\n');
-                                                                                                                                  }
-                                                                                                                                
-                                                                                                                                // Helper function to clean transcript using GPT
-                                                                                                                                async function cleanTranscript(text) {
-                                                                                                                                    try {
-                                                                                                                                          const response = await openai.chat.completions.create({
-                                                                                                                                                  model: 'gpt-4-mini',
-                                                                                                                                                  messages: [
-                                                                                                                                                            {
-                                                                                                                                                                        role: 'system',
-                                                                                                                                                                        content: 'You are a professional transcript editor. Clean up the provided transcript by: 1) Fixing obvious typos and grammar, 2) Removing filler words (um, uh, like), 3) Making it more readable while preserving exact meaning. Keep it concise and natural. Output only the cleaned transcript.'
-                                                                                                                                                                      },
-                                                                                                                                                            {
-                                                                                                                                                                        role: 'user',
-                                                                                                                                                                        content: text
-                                                                                                                                                                      }
-                                                                                                                                                          ],
-                                                                                                                                                  temperature: 0.3,
-                                                                                                                                                  max_tokens: 4000
-                                                                                                                                                });
-                                                                                                                                          
-                                                                                                                                          return response.choices[0].message.content || text;
-                                                                                                                                        } catch (e) {
-                                                                                                                                          console.error('Cleaning error:', e.message);
-                                                                                                                                          return text;
-                                                                                                                                        }
-                                                                                                                                  }
-                                                                                                                                
-                                                                                                                                // Helper function to get video duration using yt-dlp
-                                                                                                                                async function getVideoDuration(videoId) {
-                                                                                                                                    try {
-                                                                                                                                          const output = execSync(`yt-dlp --dump-json --skip-download "https://www.youtube.com/watch?v=${videoId}" 2>/dev/null | grep -o '"duration":[0-9]*' | grep -o '[0-9]*'`, {
-                                                                                                                                                  encoding: 'utf-8',
-                                                                                                                                                  maxBuffer: 10 * 1024 * 1024
-                                                                                                                                                });
-                                                                                                                                          return parseInt(output.trim()) || 0;
-                                                                                                                                        } catch (e) {
-                                                                                                                                          return 0;
-                                                                                                                                        }
-                                                                                                                                  }
-                                                                                                                                
-                                                                                                                                // Main transcript extraction endpoint
-                                                                                                                                app.post('/api/youtube-transcript', async (req, res) => {
-                                                                                                                                    try {
-                                                                                                                                          const { url, clean } = req.body;
-                                                                                                                                      
-                                                                                                                                          if (!url || !isValidYoutubeUrl(url)) {
-                                                                                                                                                  return res.status(400).json({
-                                                                                                                                                            error: 'URL no válida. Ejemplo: youtu.be/XXX o youtube.com/watch?v=XXX'
-                                                                                                                                                          });
-                                                                                                                                                }
-                                                                                                                                      
-                                                                                                                                          const videoId = getVideoId(url);
-                                                                                                                                          if (!videoId) {
-                                                                                                                                                  return res.status(400).json({
-                                                                                                                                                            error: 'No se pudo extraer el ID del video'
-                                                                                                                                                          });
-                                                                                                                                                }
-                                                                                                                                      
-                                                                                                                                          const duration = await getVideoDuration(videoId);
-                                                                                                                                          const durationMinutes = Math.ceil(duration / 60);
-                                                                                                                                          const isLongVideo = duration > 7200;
-                                                                                                                                      
-                                                                                                                                          let transcript = null;
-                                                                                                                                          let segments = null;
-                                                                                                                                          let source = 'youtube_captions';
-                                                                                                                                          let language = 'en';
-                                                                                                                                      
-                                                                                                                                          try {
-                                                                                                                                                  const captionsOutput = execSync(
-                                                                                                                                                            `yt-dlp --dump-json --skip-download "${url}" 2>/dev/null`,
-                                                                                                                                                            { encoding: 'utf-8', maxBuffer: 50 * 1024 * 1024 }
-                                                                                                                                                          );
-                                                                                                                                                  
-                                                                                                                                                  const videoData = JSON.parse(captionsOutput);
-                                                                                                                                                  
-                                                                                                                                                  if (videoData.subtitles && Object.keys(videoData.subtitles).length > 0) {
-                                                                                                                                                            const languages = Object.keys(videoData.subtitles);
-                                                                                                                                                            const lang = languages.find(l => l.startsWith('en')) || languages[0];
-                                                                                                                                                            language = lang.split('-')[0];
-                                                                                                                                                            
-                                                                                                                                                            if (videoData.subtitles[lang] && videoData.subtitles[lang].length > 0) {
-                                                                                                                                                                        const captionUrl = videoData.subtitles[lang][0].url;
-                                                                                                                                                                        const captionData = execSync(`curl -s "${captionUrl}" 2>/dev/null`, {
-                                                                                                                                                                                      encoding: 'utf-8',
-                                                                                                                                                                                      maxBuffer: 50 * 1024 * 1024
-                                                                                                                                                                                    });
-                                                                                                                                                                        
-                                                                                                                                                                        segments = parseJson3Captions(captionData);
-                                                                                                                                                                        
-                                                                                                                                                                        if (segments) {
-                                                                                                                                                                                      transcript = segments.map(s => s.text).join(' ');
-                                                                                                                                                                                    }
-                                                                                                                                                                      }
-                                                                                                                                                          }
-                                                                                                                                                } catch (e) {
-                                                                                                                                                  console.log('Caption extraction failed, will try fallback:', e.message);
-                                                                                                                                                }
-                                                                                                                                      
-                                                                                                                                          if (!transcript) {
-                                                                                                                                                  if (!process.env.OPENAI_API_KEY) {
-                                                                                                                                                            return res.status(500).json({
-                                                                                                                                                                        error: 'Este video no tiene transcript disponible y el servicio de transcripcion no esta configurado'
-                                                                                                                                                                      });
-                                                                                                                                                          }
-                                                                                                                                            
-                                                                                                                                                  try {
-                                                                                                                                                            source = 'openai_fallback';
-                                                                                                                                                            const tempDir = os.tmpdir();
-                                                                                                                                                            const audioPath = path.join(tempDir, `audio_${videoId}.mp3`);
-                                                                                                                                                    
-                                                                                                                                                            execSync(`yt-dlp -x --audio-format mp3 -o "${audioPath}" "${url}" 2>/dev/null`, {
-                                                                                                                                                                        timeout: 300000
-                                                                                                                                                                      });
-                                                                                                                                                    
-                                                                                                                                                            const audioFile = fs.createReadStream(audioPath);
-                                                                                                                                                            const transcriptResponse = await openai.audio.transcriptions.create({
-                                                                                                                                                                        file: audioFile,
-                                                                                                                                                                        model: 'whisper-1',
-                                                                                                                                                                        language: 'en'
-                                                                                                                                                                      });
-                                                                                                                                                    
-                                                                                                                                                            transcript = transcriptResponse.text;
-                                                                                                                                                    
-                                                                                                                                                            try {
-                                                                                                                                                                        fs.unlinkSync(audioPath);
-                                                                                                                                                                      } catch (e) {
-                                                                                                                                                                        console.log('Could not delete temp audio file:', e.message);
-                                                                                                                                                                      }
-                                                                                                                                                          } catch (e) {
-                                                                                                                                                            console.error('Whisper fallback error:', e.message);
-                                                                                                                                                            
-                                                                                                                                                            if (e.message.includes('Private')) {
-                                                                                                                                                                        return res.status(403).json({
-                                                                                                                                                                                      error: 'Este video es privado'
-                                                                                                                                                                                    });
-                                                                                                                                                                      }
-                                                                                                                                                            
-                                                                                                                                                            if (e.message.includes('Not Found') || e.message.includes('404')) {
-                                                                                                                                                                        return res.status(404).json({
-                                                                                                                                                                                      error: 'Video no encontrado. Verifica el enlace'
-                                                                                                                                                                                    });
-                                                                                                                                                                      }
-                                                                                                                                                    
-                                                                                                                                                            if (e.message.includes('429') || e.message.includes('Too Many')) {
-                                                                                                                                                                        return res.status(429).json({
-                                                                                                                                                                                      error: 'YouTube limito la extraccion. Intenta en unos minutos.'
-                                                                                                                                                                                    });
-                                                                                                                                                                      }
-                                                                                                                                                    
-                                                                                                                                                            return res.status(500).json({
-                                                                                                                                                                        error: 'Error al procesar el video. Intenta de nuevo mas tarde.'
-                                                                                                                                                                      });
-                                                                                                                                                          }
-                                                                                                                                                }
-                                                                                                                                      
-                                                                                                                                          if (!transcript) {
-                                                                                                                                                  return res.status(404).json({
-                                                                                                                                                            error: 'Este video no tiene transcript disponible'
-                                                                                                                                                          });
-                                                                                                                                                }
-                                                                                                                                      
-                                                                                                                                          let cleanedTranscript = transcript;
-                                                                                                                                          if (clean) {
-                                                                                                                                                  cleanedTranscript = await cleanTranscript(transcript);
-                                                                                                                                                }
-                                                                                                                                      
-                                                                                                                                          if (!segments) {
-                                                                                                                                                  segments = [];
-                                                                                                                                                  const words = cleanedTranscript.split(/\s+/);
-                                                                                                                                                  let currentTime = 0;
-                                                                                                                                                  const wordDuration = duration / words.length;
-                                                                                                                                                  
-                                                                                                                                                  segments = words.map(word => {
-                                                                                                                                                            const start = currentTime;
-                                                                                                                                                            currentTime += wordDuration;
-                                                                                                                                                            return {
-                                                                                                                                                                        text: word,
-                                                                                                                                                                        start: start,
-                                                                                                                                                                        duration: wordDuration
-                                                                                                                                                                      };
-                                                                                                                                                          });
-                                                                                                                                                }
-                                                                                                                                      
-                                                                                                                                          const srt = generateSRT(segments);
-                                                                                                                                          const wordCount = transcript.split(/\s+/).length;
-                                                                                                                                      
-                                                                                                                                          res.json({
-                                                                                                                                                  transcript,
-                                                                                                                                                  cleanedTranscript,
-                                                                                                                                                  segments,
-                                                                                                                                                  srt,
-                                                                                                                                                  language,
-                                                                                                                                                  duration,
-                                                                                                                                                  durationMinutes,
-                                                                                                                                                  wordCount,
-                                                                                                                                                  isLongVideo,
-                                                                                                                                                  source
-                                                                                                                                                });
-                                                                                                                                      
-                                                                                                                                        } catch (error) {
-                                                                                                                                          console.error('Endpoint error:', error);
-                                                                                                                                          res.status(500).json({
-                                                                                                                                                  error: 'Error al procesar. Intenta de nuevo'
-                                                                                                                                                });
-                                                                                                                                        }
-                                                                                                                                  });
-                                                                                                                                
-                                                                                                                                app.listen(port, () => {
-                                                                                                                                    console.log(`YouTubeTranscriber API listening on port ${port}`);
-                                                                                                                                  });
+async function fallbackDownloadAudio(url, filePathNoExt) {
+  await execFileAsync("yt-dlp", ["--no-playlist","-f","bestaudio/best","-x","--audio-format","mp3","-o",filePathNoExt+".%(ext)s",url], { maxBuffer: 20*1024*1024 });
+  return filePathNoExt+".mp3";
+}
+
+app.get("/health", (_req, res) => { res.json({ ok: true }); });
+
+app.post("/api/youtube-transcript", async (req, res) => {
+  const { url, clean = true } = req.body || {};
+  if (!url || typeof url !== "string") return res.status(400).json({ error: "URL requerida" });
+  const videoId = extractVideoId(url);
+  if (!videoId) return res.status(400).json({ error: "URL no válida. Ejemplo: youtu.be/XXX o youtube.com/watch?v=XXX" });
+
+  let tempBase = null;
+  try {
+    const info = await runYtDlpJson(url);
+    if (!info?.id) return res.status(404).json({ error: "Video no encontrado" });
+    if (info?.availability === "private" || info?.is_private) return res.status(403).json({ error: "Video privado" });
+
+    const subtitleTrack = pickSubtitleUrl(info);
+    let transcript = "", cleanedTranscript = "", segments = [];
+    let language = subtitleTrack?.language || info.language || null;
+    let duration = typeof info.duration === "number" ? info.duration : null;
+    let source = "youtube_captions";
+
+    if (subtitleTrack?.url) {
+      const json3 = await fetchJson(subtitleTrack.url);
+      const parsed = parseJson3CaptionTrack(json3);
+      transcript = parsed.transcript;
+      segments = parsed.segments;
+    } else {
+      tempBase = path.join(os.tmpdir(), "yt-"+videoId+"-"+Date.now());
+      const audioPath = await fallbackDownloadAudio(url, tempBase);
+      const fallback = await transcribeAudioWithOpenAI(audioPath);
+      transcript = fallback.transcript;
+      segments = fallback.segments;
+      language = fallback.language || language;
+      duration = fallback.duration || duration;
+      source = "openai_fallback";
+    }
+
+    if (!transcript) return res.status(404).json({ error: "Este video no tiene transcript disponible" });
+
+    cleanedTranscript = clean ? await cleanTranscriptWithOpenAI(transcript) : transcript;
+    const srt = segments.length ? segmentsToSrt(segments) : "";
+    const totalWords = wordCount(cleanedTranscript || transcript);
+    const durationMinutes = duration ? Math.round((duration/60)*100)/100 : null;
+    const isLongVideo = duration ? duration > 7200 : false;
+
+    return res.json({ transcript, cleanedTranscript, segments, srt, language, duration, durationMinutes, isLongVideo, wordCount: totalWords, source });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Error al procesar";
+    if (message.includes("Video unavailable")) return res.status(404).json({ error: "Video no encontrado" });
+    if (message.includes("Private video")) return res.status(403).json({ error: "Video privado" });
+    if (message.includes("429")) return res.status(429).json({ error: "YouTube limitó temporalmente la extracción. Intenta de nuevo en unos minutos." });
+    return res.status(500).json({ error: "Error al procesar. Intenta de nuevo", details: message });
+  } finally {
+    if (tempBase) {
+      try {
+        const dir = path.dirname(tempBase);
+        const base = path.basename(tempBase);
+        const files = await fs.readdir(dir);
+        await Promise.all(files.filter((f) => f.startsWith(base)).map((f) => fs.unlink(path.join(dir,f)).catch(()=>null)));
+      } catch {}
+    }
+  }
+});
+
+app.listen(process.env.PORT || 3000, () => {
+  console.log("YouTubeTranscriber API listening on port "+(process.env.PORT||3000));
+});
