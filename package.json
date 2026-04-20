@@ -1,0 +1,14 @@
+{
+    "name": "youtube-transcriber-api",
+    "version": "1.0.0",
+    "type": "module",
+    "scripts": {
+          "start": "node railway-node-server-v2.js"
+    },
+    "dependencies": {
+          "cors": "^2.8.5",
+          "express": "^4.21.2",
+          "multer": "^1.4.5-lts.1",
+          "openai": "^4.104.0"
+    }
+}
