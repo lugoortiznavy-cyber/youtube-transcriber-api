@@ -1,0 +1,49 @@
+{
+  "meta": {
+    "titulo": "La Hora del Vacilon",
+    "descripcion": "Talk show satirico estilo radio de Puerto Rico. Personajes ficticios Papi y Wiwi. Piloto: Segmentos 1-2.",
+    "nota": "Voces sinteticas de personajes inventados. No imita a personas reales. Cambia el mapa de voces abajo a tu gusto."
+  },
+  "voices": {
+    "PAPI": { "voice": "es-PR-VictorNeural", "rate": "-8%", "pitch": "-3Hz" },
+    "WIWI": { "voice": "es-DO-EmilioNeural", "rate": "+6%", "pitch": "+0Hz" }
+  },
+  "pausa_entre_lineas_ms": 350,
+  "lines": [
+    { "speaker": "PAPI", "text": "Wepa, wepa, wepa! Buenos dias, Puerto Rico, arranca La Hora del Vacilon, y aqui estamos otra vez, contra viento, marea, y contra el recibo de la luz." },
+    { "speaker": "WIWI", "text": "Buenos dias, mi gente. Papi, son las seis de la manana y ya empezaste hablando de la luz. Relajate, mano, dale chance al dia." },
+    { "speaker": "PAPI", "text": "Como que le de chance? Oyeme bien, Wiwi: yo me levante hoy, prendi la cafetera, y se fue la luz. Con el cafe a medio colar." },
+    { "speaker": "WIWI", "text": "No! Otra vez?" },
+    { "speaker": "PAPI", "text": "Otra vez! Cafe tibio, mano. Yo no le deseo eso ni a mi peor enemigo." },
+    { "speaker": "WIWI", "text": "Acho, eso si es sufrimiento de verdad. Un boricua sin cafe es un boricua peligroso." },
+    { "speaker": "PAPI", "text": "Peligrosisimo! Yo sali al balcon a gritarle al poste. Al poste, Wiwi. Como si el poste me fuera a contestar." },
+    { "speaker": "WIWI", "text": "Y te contesto?" },
+    { "speaker": "PAPI", "text": "Me miro con la misma cara del gobierno: apagao." },
+    { "speaker": "WIWI", "text": "Ja! Papi, tu estas mal de la cabeza, pero te quiero. Bueno, mi gente, ese es el tema de hoy: sobrevivir en esta isla y todavia tener chavos pal viernes." },
+    { "speaker": "PAPI", "text": "Y con la sonrisa puesta, porque el boricua se rie hasta en la oscuridad. Literal, en la oscuridad." },
+    { "speaker": "WIWI", "text": "Literal. Quedate ahi que ahora venimos con El Bochinche del Gobierno." },
+    { "speaker": "PAPI", "text": "Volvimos. Y Wiwi, tu sabes que a mi no me gusta meterme en politica." },
+    { "speaker": "WIWI", "text": "Papi, tu te metes en politica antes de lavarte los dientes." },
+    { "speaker": "PAPI", "text": "Porque alguien tiene que hacerlo! Mira, ayer anunciaron un plan nuevo. Un plan. Pa arreglar lo del plan viejo. Que era pa arreglar el plan de antes." },
+    { "speaker": "WIWI", "text": "O sea, un plan pa arreglar el plan del plan." },
+    { "speaker": "PAPI", "text": "Exacto! Es como una cebolla. Le quitas una capa y lo unico que hace es que lloras mas." },
+    { "speaker": "WIWI", "text": "Ja! Y de gratis no es la cebolla esa, eh? Esa cebolla la pagamos nosotros." },
+    { "speaker": "PAPI", "text": "La pagamos con impuesto, con IVU, y con el cargo por servicio que nadie sabe que servicio es!" },
+    { "speaker": "WIWI", "text": "El cargo por servicio es mi favorito. Servicio de que, mano. Yo pago por un servicio que no vi, no toque, y no llego." },
+    { "speaker": "PAPI", "text": "Es como el delivery que te cobra y te deja la comida en casa del vecino." },
+    { "speaker": "WIWI", "text": "Y el vecino se la come!" },
+    { "speaker": "PAPI", "text": "Y todavia te manda las gracias por mensaje! Gracias, estaba buenisimo. De nada, mano, de nada." },
+    { "speaker": "WIWI", "text": "Hablando de burocracia: yo fui a hacer una gestion, tu sabes lo que me dijeron? Vuelva manana." },
+    { "speaker": "PAPI", "text": "Clasico." },
+    { "speaker": "WIWI", "text": "Volvi manana. Y me dijeron: y usted por que no vino ayer?" },
+    { "speaker": "PAPI", "text": "Oyeme eso! Es un laberinto disenao pa que te rindas." },
+    { "speaker": "WIWI", "text": "Es que ese es el plan, Papi. El unico plan que si funciona: cansarte." },
+    { "speaker": "PAPI", "text": "Ahi le diste. En este pais el que no se cansa, no es de aqui." },
+    { "speaker": "WIWI", "text": "O tiene un primo que trabaja adentro." },
+    { "speaker": "PAPI", "text": "Ah, el primo! El primo lo arregla todo. Aqui no hay sistema, hay primos." },
+    { "speaker": "WIWI", "text": "El PDF oficial de Puerto Rico: Primo Disponible por Favor." },
+    { "speaker": "PAPI", "text": "Ja! Wiwi, apuntate esa que esa esta buena." },
+    { "speaker": "WIWI", "text": "Ya esta apunta, mano. Nos vamos a una pausa y volvemos con El Bolsillo del Pueblo, porque hay que hablar de por que el super ahora pide down payment." },
+    { "speaker": "PAPI", "text": "Down payment pa un carrito de compra! No te vayas, esto es La Hora del Vacilon." }
+  ]
+}
